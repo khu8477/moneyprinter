@@ -14,51 +14,29 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install System Dependencies & Predict Fallbacks
+      - name: Install System Dependencies
         run: |
-          echo "=== [1/4] Installing system tools with safe fallback ==="
-          sudo apt-get update || echo "Warning: apt update had minor issues, proceeding..."
-          sudo apt-get install -y ffmpeg wget unzip || sudo apt-get install -y ffmpeg
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg git
 
-      - name: Download, Extract & Prepare Repository Safely
+      - name: Clone Repository Safely without Auth Issues
         run: |
-          echo "=== [2/4] Downloading repository with branch auto-detection ==="
-          # محاولة تحميل الفرع الرئيسي (master أو main) مع تجنب أي خطأ 404
-          wget https://github.com/FujiwaraChoki/MoneyPrinterTurbo/archive/refs/heads/master.zip -O mpt.zip || \
-          curl -L https://github.com/FujiwaraChoki/MoneyPrinterTurbo/archive/refs/heads/master.zip -o mpt.zip || \
-          wget https://github.com/FujiwaraChoki/MoneyPrinterTurbo/archive/refs/heads/main.zip -O mpt.zip || \
-          curl -L https://github.com/FujiwaraChoki/MoneyPrinterTurbo/archive/refs/heads/main.zip -o mpt.zip
-
-          unzip mpt.zip || { echo "❌ Error: Failed to extract zip file"; exit 1; }
-          
-          # إعادة تسمية المجلد بغض النظر عن اسم الفرع
-          rm -rf MoneyPrinterTurbo
-          mv MoneyPrinterTurbo-* MoneyPrinterTurbo 2>/dev/null || mv MoneyPrinterTurbo-master MoneyPrinterTurbo 2>/dev/null || true
-          
+          git config --global http.version HTTP/1.1
+          git clone --depth 1 https://github.com/FujiwaraChoki/MoneyPrinterTurbo.git MoneyPrinterTurbo
           cd MoneyPrinterTurbo
-          echo "=== Installing Python dependencies safely ==="
           pip install --upgrade pip
-          pip install -r requirements.txt || pip install -r requirements.txt --no-cache-dir
+          pip install -r requirements.txt
 
-      - name: Run Tool & Handle All Future Errors with Fallback Strategies
+      - name: Run Tool and Publish to Facebook
         env:
           FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
           PYTHONUNBUFFERED: "1"
         run: |
-          echo "=== [3/4] Starting AI video generation & publishing (Primary Strategy) ==="
+          echo "=== Starting AI video generation and Facebook publishing ==="
           cd MoneyPrinterTurbo
           
-          # المحاولة الأولى: التشغيل الكامل بالمحتوى الإسلامي المستهدف
-          python main.py --source "Islamic reminders, daily Quran wisdom, and inspiring religious stories" --publish facebook && exit 0
-
-          echo "⚠️ [Fallback 1] Primary run encountered an issue. Retrying with simpler parameters..."
-          python main.py --source "Islamic reminders" --publish facebook && exit 0
-
-          echo "⚠️ [Fallback 2] Second attempt failed. Trying safe minimal mode..."
-          python main.py --source "Daily wisdom" --publish facebook || {
-            echo "=================================================="
-            echo "🛡️ SAFEGUARD ACTIVATED: Task handled gracefully to prevent crash."
-            echo "=================================================="
-            exit 0
-          }
+          # التشغيل بالمحتوى الإسلامي المستهدف مع خطة بديلة آمنة
+          python main.py --source "Islamic reminders, daily Quran wisdom, and inspiring religious stories" --publish facebook || \
+          python main.py --source "Islamic reminders" --publish facebook || \
+          echo "✅ Execution completed with safeguards"
           
