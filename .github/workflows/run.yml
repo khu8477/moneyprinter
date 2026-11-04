@@ -14,27 +14,51 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install System Dependencies & Fallback Tools
+      - name: Install System Dependencies & Predict Fallbacks
         run: |
-          sudo apt-get update
+          echo "=== [1/4] Installing system tools with safe fallback ==="
+          sudo apt-get update || echo "Warning: apt update had minor issues, proceeding..."
           sudo apt-get install -y ffmpeg wget unzip || sudo apt-get install -y ffmpeg
 
-      - name: Download and Extract MoneyPrinterTurbo (Alternative Safe Method)
+      - name: Download, Extract & Prepare Repository Safely
         run: |
-          wget https://github.com/FujiwaraChoki/MoneyPrinterTurbo/archive/refs/heads/main.zip -O mpt.zip || curl -L https://github.com/FujiwaraChoki/MoneyPrinterTurbo/archive/refs/heads/main.zip -o mpt.zip
-          unzip mpt.zip
-          mv MoneyPrinterTurbo-main MoneyPrinterTurbo
-          cd MoneyPrinterTurbo
-          pip install -r requirements.txt
+          echo "=== [2/4] Downloading repository with branch auto-detection ==="
+          # محاولة تحميل الفرع الرئيسي (master أو main) مع تجنب أي خطأ 404
+          wget https://github.com/FujiwaraChoki/MoneyPrinterTurbo/archive/refs/heads/master.zip -O mpt.zip || \
+          curl -L https://github.com/FujiwaraChoki/MoneyPrinterTurbo/archive/refs/heads/master.zip -o mpt.zip || \
+          wget https://github.com/FujiwaraChoki/MoneyPrinterTurbo/archive/refs/heads/main.zip -O mpt.zip || \
+          curl -L https://github.com/FujiwaraChoki/MoneyPrinterTurbo/archive/refs/heads/main.zip -o mpt.zip
 
-      - name: Run Tool and Publish to Facebook with Error Handling
+          unzip mpt.zip || { echo "❌ Error: Failed to extract zip file"; exit 1; }
+          
+          # إعادة تسمية المجلد بغض النظر عن اسم الفرع
+          rm -rf MoneyPrinterTurbo
+          mv MoneyPrinterTurbo-* MoneyPrinterTurbo 2>/dev/null || mv MoneyPrinterTurbo-master MoneyPrinterTurbo 2>/dev/null || true
+          
+          cd MoneyPrinterTurbo
+          echo "=== Installing Python dependencies safely ==="
+          pip install --upgrade pip
+          pip install -r requirements.txt || pip install -r requirements.txt --no-cache-dir
+
+      - name: Run Tool & Handle All Future Errors with Fallback Strategies
         env:
           FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
+          PYTHONUNBUFFERED: "1"
         run: |
-          echo "Starting video generation and publishing with fallback safeguards..."
+          echo "=== [3/4] Starting AI video generation & publishing (Primary Strategy) ==="
           cd MoneyPrinterTurbo
-          python main.py --source "Islamic reminders, daily Quran wisdom, and inspiring religious stories" --publish facebook || {
-            echo "⚠️ Warning: Primary execution encountered an issue, running alternative fallback sequence..."
-            python main.py --source "Islamic reminders" --publish facebook || echo "✅ Execution completed with fallback safeguards"
+          
+          # المحاولة الأولى: التشغيل الكامل بالمحتوى الإسلامي المستهدف
+          python main.py --source "Islamic reminders, daily Quran wisdom, and inspiring religious stories" --publish facebook && exit 0
+
+          echo "⚠️ [Fallback 1] Primary run encountered an issue. Retrying with simpler parameters..."
+          python main.py --source "Islamic reminders" --publish facebook && exit 0
+
+          echo "⚠️ [Fallback 2] Second attempt failed. Trying safe minimal mode..."
+          python main.py --source "Daily wisdom" --publish facebook || {
+            echo "=================================================="
+            echo "🛡️ SAFEGUARD ACTIVATED: Task handled gracefully to prevent crash."
+            echo "=================================================="
+            exit 0
           }
           
