@@ -17,19 +17,30 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Clone MoneyPrinterTurbo
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Clone MoneyPrinterTurbo and Install Python Requirements
         run: |
           git clone https://github.com/FujiwaraChoki/MoneyPrinterTurbo.git
           cd MoneyPrinterTurbo
           pip install -r requirements.txt
 
-      - name: Generate Content and Publish to Facebook
+      - name: Run Tool with Detailed Error Diagnostics
         env:
           FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
+          PYTHONUNBUFFERED: "1"
         run: |
-          echo "Generating Islamic daily script and creating video..."
+          echo "=== Starting Detailed Diagnostics Run == "
           cd MoneyPrinterTurbo
-          
-          # توليد فيديو محتوى ديني هادف وتلقائي عبر الأداة ونشره
-          python main.py --source "Islamic reminders, daily Quran wisdom, and inspiring religious stories" --publish facebook || echo "Video generation and publishing task completed"
+          # تشغيل مع كاشف أخطاء مفصل يطبع أي مشكلة تحدث أثناء التنفيذ
+          python main.py --source "Islamic reminders, daily Quran wisdom, and inspiring religious stories" --publish facebook || {
+            EXIT_CODE=$?
+            echo "=========================================="
+            echo "❌ ERROR DETECTED! Exit code: $EXIT_CODE"
+            echo "=========================================="
+            exit $EXIT_CODE
+          }
           
