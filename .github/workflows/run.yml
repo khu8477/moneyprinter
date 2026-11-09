@@ -28,7 +28,7 @@ env:
 jobs:
   run-money-printer:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash -Eeuo pipefail {0}
@@ -79,6 +79,7 @@ jobs:
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           VIDEO_TOPIC: ${{ github.event.inputs.topic }}
           PUBLISH_MODE: ${{ github.event.inputs.publish_mode || 'draft' }}
         run: |
@@ -92,6 +93,7 @@ jobs:
           LOGS.mkdir(exist_ok=True)
           API = "http://127.0.0.1:8080"
           SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY")
+          GEM = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
           # ---------- إظهار مكان الخطأ ----------
@@ -126,15 +128,25 @@ jobs:
               return val
 
 
-          # ---------- إعداد الأداة ----------
+          # ---------- إعداد الأداة (Pexels) ----------
+          def set_toml(text, key, value):
+              pattern = rf'^{re.escape(key)}\s*=.*$'
+              line = f'{key} = "{value}"'
+              if re.search(pattern, text, flags=re.M):
+                  return re.sub(pattern, lambda m: line, text, count=1, flags=re.M)
+              return text + f"\n{line}\n"
+
+
           def prepare_config():
               src, dst = MPT / "config.example.toml", MPT / "config.toml"
               text = src.read_text(encoding="utf-8")
-              if re.search(r'^video_source\s*=', text, flags=re.M):
-                  text = re.sub(r'^video_source\s*=.*$', lambda m: 'video_source = "local"',
-                                text, count=1, flags=re.M)
+              pexels = need("PEXELS_API_KEY")
+              text = re.sub(r'^pexels_api_keys\s*=.*$',
+                            lambda m: f'pexels_api_keys = ["{pexels}"]',
+                            text, count=1, flags=re.M)
+              text = set_toml(text, "video_source", "pexels")
               dst.write_text(text, encoding="utf-8")
-              log("config.toml جاهز")
+              log("config.toml جاهز (pexels)")
 
 
           # ---------- تشغيل السيرفر ----------
@@ -156,10 +168,14 @@ jobs:
               raise TimeoutError("السيرفر لم يبدأ خلال دقيقتين")
 
 
-          # ---------- كتابة النص عبر Gemini (اختيار النموذج تلقائياً) ----------
+          # ---------- Gemini (اختيار النموذج تلقائياً) ----------
+          _models = []
+
+
           def pick_models(key):
-              r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
-                               params={"key": key, "pageSize": 100}, timeout=30)
+              if _models:
+                  return _models
+              r = requests.get(GEM, params={"key": key, "pageSize": 100}, timeout=30)
               r.raise_for_status()
               names = [m["name"].split("/")[-1] for m in r.json().get("models", [])
                        if "generateContent" in m.get("supportedGenerationMethods", [])]
@@ -170,47 +186,57 @@ jobs:
               rest = [n for n in names if n not in good and "flash" in n]
               if not (good or rest):
                   raise RuntimeError(f"لا يوجد نموذج flash متاح لمفتاحك. المتاح: {names}")
-              return (good + rest)[:4]
+              _models.extend((good + rest)[:4])
+              return _models
 
 
-          def write_script(topic):
+          def gemini(prompt, min_len=5):
               key = need("GEMINI_API_KEY")
-              prompt = (f"اكتب نصا قصيرا بالعربية الفصحى (نحو 80 كلمة) عن: {topic}. "
-                        "اسلوب تاملي هادئ. لا تذكر اي اية او حديث او نسبة قول لاحد. "
-                        "اكتب النص فقط دون عنوان.")
               last = None
               for model in pick_models(key):
-                  url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
                   for attempt in range(2):
                       try:
-                          r = requests.post(url, params={"key": key}, timeout=90,
+                          r = requests.post(f"{GEM}/{model}:generateContent", params={"key": key},
+                                            timeout=90,
                                             json={"contents": [{"parts": [{"text": prompt}]}]})
                           r.raise_for_status()
                           text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-                          if len(text) >= 50:
-                              log(f"تم توليد النص بالنموذج: {model}")
+                          if len(text) >= min_len:
                               return text
-                          last = "النص المولّد قصير أو فارغ"
+                          last = "نص قصير أو فارغ"
                       except Exception as e:
                           last = f"{model}: {e}"
                       log(f"فشلت المحاولة ({model}): {last}")
                       time.sleep(4)
-              raise RuntimeError(f"فشل توليد النص بكل النماذج. آخر خطأ: {last}")
+              raise RuntimeError(f"فشل Gemini بكل النماذج. آخر خطأ: {last}")
 
 
-          # ---------- خلفية الفيديو (ffmpeg) ----------
-          def make_background():
-              out = LOGS / "bg.mp4"
-              cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i",
-                     "gradients=s=1080x1920:d=40:speed=0.02:c0=0x0b3d2e:c1=0x1b6b4a:c2=0x123524:nb_colors=3",
-                     "-r", "30", "-pix_fmt", "yuv420p", str(out)]
-              res = subprocess.run(cmd, capture_output=True, text=True)
-              if res.returncode != 0:
-                  raise RuntimeError("فشل ffmpeg في صنع الخلفية: " + res.stderr[-500:])
-              return str(out)
+          def write_script(topic):
+              prompt = (f"اكتب نصا قصيرا بالعربية الفصحى (نحو 80 كلمة) عن: {topic}. "
+                        "اسلوب تاملي هادئ. لا تذكر اي اية او حديث او نسبة قول لاحد. "
+                        "اكتب النص فقط دون عنوان.")
+              return gemini(prompt, min_len=50)
 
 
-          # ---------- توليد الفيديو بخطط بديلة ----------
+          def make_terms(topic, default):
+              try:
+                  t = gemini(f"Give 5 English keywords for stock nature or sky footage matching "
+                             f"the theme: {topic}. Comma-separated, nothing else.")
+                  t = re.sub(r"[^A-Za-z, ]", "", t).strip(" ,")
+                  return t or default
+              except Exception as e:
+                  log(f"تعذر توليد الكلمات المفتاحية: {e}")
+                  return default
+
+
+          # ---------- المواضيع البديلة (تُستخدم إذا لم يوجد فيديو) ----------
+          FALLBACKS = [
+              ("فضل الاستغفار", "nature, sky, calm"),
+              ("جمال التأمل في خلق الله", "ocean, mountains, sunrise"),
+              ("الصبر وحسن الظن بالله", "forest, river, clouds"),
+              ("شكر النعم", "sunset, flowers, garden"),
+          ]
+
           TIERS = [
               {"name": "full", "paragraph_number": 3},
               {"name": "medium", "paragraph_number": 2},
@@ -218,33 +244,10 @@ jobs:
           ]
 
 
-          def generate_video(topic):
-              script = write_script(topic)
-              log(f"النص: {script[:120]}...")
-              bg = make_background()
-              last_err = None
-              for tier in TIERS:
-                  log(f"محاولة بخطة: {tier['name']}")
-                  body = {
-                      "video_subject": topic,
-                      "video_script": script,
-                      "video_terms": "nature, calm",
-                      "video_language": "ar",
-                      "voice_name": os.environ.get("VOICE_NAME", "ar-SA-HamedNeural-Male"),
-                      "video_aspect": "9:16",
-                      "video_source": "local",
-                      "video_materials": [{"provider": "local", "url": bg, "duration": 0}],
-                      "paragraph_number": tier["paragraph_number"],
-                      "video_count": 1,
-                  }
-                  try:
-                      r = requests.post(f"{API}/api/v1/videos", json=body, timeout=60)
-                      r.raise_for_status()
-                      return wait_for_task(r.json()["data"]["task_id"])
-                  except Exception as e:
-                      last_err = e
-                      log(f"فشلت خطة {tier['name']}: {e}")
-              raise RuntimeError(f"فشلت كل الخطط. آخر خطأ: {last_err}")
+          class TaskFailed(Exception):
+              def __init__(self, stage, detail):
+                  super().__init__(f"المهمة فشلت (المرحلة: {stage}): {detail}")
+                  self.stage = stage
 
 
           def wait_for_task(task_id, timeout=1500):
@@ -256,7 +259,7 @@ jobs:
                   if state == 1:
                       videos = d.get("videos") or []
                       if not videos:
-                          raise RuntimeError("المهمة اكتملت بدون ملف فيديو")
+                          raise TaskFailed("output", "المهمة اكتملت بدون ملف فيديو")
                       out = LOGS / f"{task_id}.mp4"
                       if videos[0].startswith("http"):
                           with requests.get(videos[0], stream=True, timeout=120) as r:
@@ -268,9 +271,48 @@ jobs:
                           out.write_bytes(pathlib.Path(videos[0]).read_bytes())
                       return out
                   if state == -1:
-                      raise RuntimeError(f"المهمة فشلت داخل MoneyPrinterTurbo: {d}")
+                      raise TaskFailed(d.get("failed_stage") or "unknown",
+                                       d.get("error") or str(d)[:400])
                   time.sleep(10)
               raise TimeoutError("انتهت مهلة انتظار الفيديو")
+
+
+          # ---------- توليد الفيديو: إن لم يوجد فيديو يغيّر الموضوع ----------
+          def generate_video(first_topic):
+              candidates = [(first_topic, None)] + FALLBACKS
+              last_err = None
+              for topic, default_terms in candidates:
+                  log(f"الموضوع: {topic}")
+                  script = write_script(topic)
+                  terms = make_terms(topic, default_terms or "nature, sky, calm")
+                  log(f"كلمات البحث: {terms}")
+                  for tier in TIERS:
+                      log(f"محاولة بخطة: {tier['name']}")
+                      body = {
+                          "video_subject": topic,
+                          "video_script": script,
+                          "video_terms": terms,
+                          "video_language": "ar",
+                          "voice_name": os.environ.get("VOICE_NAME", "ar-SA-HamedNeural-Male"),
+                          "video_aspect": "9:16",
+                          "video_source": "pexels",
+                          "paragraph_number": tier["paragraph_number"],
+                          "video_count": 1,
+                      }
+                      try:
+                          r = requests.post(f"{API}/api/v1/videos", json=body, timeout=60)
+                          r.raise_for_status()
+                          return wait_for_task(r.json()["data"]["task_id"]), topic
+                      except TaskFailed as e:
+                          last_err = e
+                          log(f"فشلت خطة {tier['name']}: {e}")
+                          if e.stage == "materials":
+                              log("لم يوجد فيديو/صورة مناسبة، تغيير الموضوع...")
+                              break
+                      except Exception as e:
+                          last_err = e
+                          log(f"فشلت خطة {tier['name']}: {e}")
+              raise RuntimeError(f"فشلت كل المواضيع والخطط. آخر خطأ: {last_err}")
 
 
           # ---------- النشر على فيسبوك ----------
@@ -288,20 +330,19 @@ jobs:
 
 
           def main():
-              need("FB_PAGE_ID")
-              need("FB_PAGE_TOKEN")
-              need("GEMINI_API_KEY")
+              for n in ("FB_PAGE_ID", "FB_PAGE_TOKEN", "GEMINI_API_KEY", "PEXELS_API_KEY"):
+                  need(n)
               topic = os.environ.get("VIDEO_TOPIC", "").strip() or "فضل الذكر والاستغفار"
               prepare_config()
               server = start_server()
               try:
-                  video = generate_video(topic)
-                  publish(video, topic)
+                  video, used_topic = generate_video(topic)
+                  publish(video, used_topic)
               finally:
                   server.terminate()
               if SUMMARY:
                   with open(SUMMARY, "a", encoding="utf-8") as s:
-                      s.write(f"## ✅ تم بنجاح\n- الموضوع: {topic}\n")
+                      s.write(f"## ✅ تم بنجاح\n- الموضوع المستخدم: {used_topic}\n")
 
 
           if __name__ == "__main__":
