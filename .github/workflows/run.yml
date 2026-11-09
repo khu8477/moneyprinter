@@ -1,15 +1,15 @@
-name: MoneyPrinter Auto Publisher
+name: MoneyPrinter Daily Publisher
 
 on:
   schedule:
-    - cron: "0 9 * * *"
+    - cron: "17 9 * * *"     # مرة يومياً 09:17 UTC (10:17 بتوقيت المغرب)
   workflow_dispatch:
     inputs:
       topic:
-        description: "موضوع الفيديو (اختياري)"
+        description: "موضوع الفيديو (اتركه فارغاً ليُختار تلقائياً)"
         required: false
       publish_mode:
-        description: "draft = مسودة للمراجعة | public = نشر مباشر"
+        description: "draft = مسودة | public = نشر علني"
         default: "draft"
         type: choice
         options: [draft, public]
@@ -74,14 +74,14 @@ jobs:
           done
           exit 1
 
-      - name: Run Tool and Publish to Facebook
+      - name: Generate Video and Publish to Facebook
         env:
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           VIDEO_TOPIC: ${{ github.event.inputs.topic }}
-          PUBLISH_MODE: ${{ github.event.inputs.publish_mode || 'draft' }}
+          PUBLISH_MODE: ${{ github.event.inputs.publish_mode || 'public' }}
         run: |
           cat > run_and_publish.py <<'PY'
           import os, re, sys, time, pathlib, subprocess, traceback, datetime
@@ -92,8 +92,41 @@ jobs:
           LOGS = ROOT / "logs"
           LOGS.mkdir(exist_ok=True)
           API = "http://127.0.0.1:8080"
-          SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY")
           GEM = "https://generativelanguage.googleapis.com/v1beta/models"
+          FB = "https://graph.facebook.com/v21.0"
+          SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY")
+
+
+          # =====================================================
+          #   قسم المحتوى: عدّل هذا القسم فقط لتغيير نوع المحتوى
+          # =====================================================
+
+          # (الموضوع بالعربية، كلمات بحث الفيديو بالإنجليزية)
+          TOPICS = [
+              ("جمال الطبيعة من حولنا", "nature, mountains, forest, sunlight"),
+              ("أهمية الصبر في الحياة", "river, rain, forest, peaceful"),
+              ("قيمة الوقت", "clock, timelapse, sky, clouds"),
+              ("الامتنان لما نملك", "flowers, garden, sunset, golden"),
+              ("الهدوء والسكينة", "lake, mist, mountains, serene"),
+              ("التفاؤل بيوم جديد", "sunrise, hills, light, morning"),
+              ("الإصرار على تحقيق الأهداف", "mountain, climbing, peak, sky"),
+              ("متعة التعلم كل يوم", "books, library, light, calm"),
+              ("قوة الابتسامة", "sunshine, field, flowers, bright"),
+              ("أهمية الصدق في التعامل", "river, mountains, morning, clear"),
+              ("الاستمتاع بالأشياء البسيطة", "meadow, breeze, trees, fresh"),
+              ("التعاون وروح الفريق", "birds, flock, sky, sunset"),
+              ("الشجاعة في مواجهة التحديات", "ocean, waves, rocks, storm"),
+              ("بداية جديدة كل صباح", "sunrise, sea, horizon, calm"),
+          ]
+
+          # أسلوب النص (يمكنك تغييره لاحقاً)
+          CONTENT_STYLE = ("أسلوب تحفيزي هادئ ومؤثر وبسيط. "
+                           "لا تذكر اي ايات او احاديث او اقتباسات منسوبة لاي شخص. "
+                           "لا تذكر ارقاما او احصاءات او معلومات طبية او سياسية.")
+          WORDS = 60
+          HASHTAGS = "#تحفيز #تأملات #طبيعة #إيجابية"
+
+          # =====================================================
 
 
           # ---------- إظهار مكان الخطأ ----------
@@ -102,7 +135,7 @@ jobs:
               mine = [f for f in frames if str(ROOT) in f.filename] or frames
               last = mine[-1]
               msg = f"{exc_type.__name__}: {exc}".replace("\n", " ")
-              print(f"::error file=run_and_publish.py,line={last.lineno},title=Script failed::{msg}")
+              print(f"::error file=run_and_publish.py,line={last.lineno},title=Script failed::{msg[:900]}")
               full = "".join(traceback.format_exception(exc_type, exc, tb))
               print(full)
               if SUMMARY:
@@ -110,7 +143,7 @@ jobs:
                       s.write("## ❌ فشل التشغيل\n")
                       s.write(f"- **السطر في السكربت:** `{last.lineno}`\n")
                       s.write(f"- **الدالة:** `{last.name}`\n- **الكود:** `{last.line}`\n")
-                      s.write(f"- **الخطأ:** `{msg}`\n\n```\n{full}\n```\n")
+                      s.write(f"- **الخطأ:** `{msg[:900]}`\n\n```\n{full}\n```\n")
               (LOGS / "error.txt").write_text(full, encoding="utf-8")
 
 
@@ -126,6 +159,12 @@ jobs:
               if not val:
                   raise RuntimeError(f"السر {name} غير موجود أو فارغ في GitHub Secrets")
               return val
+
+
+          def todays_topics(custom):
+              start = datetime.date.today().toordinal() % len(TOPICS)
+              rotated = TOPICS[start:] + TOPICS[:start]
+              return ([(custom, None)] + rotated) if custom else rotated
 
 
           # ---------- إعداد الأداة (Pexels) ----------
@@ -149,6 +188,18 @@ jobs:
               log("config.toml جاهز (pexels)")
 
 
+          # ---------- فحص مبكر لفيسبوك ----------
+          def check_facebook():
+              page_id, token = need("FB_PAGE_ID"), need("FB_PAGE_TOKEN")
+              r = requests.get(f"{FB}/{page_id}", params={"fields": "name", "access_token": token}, timeout=30)
+              if r.status_code != 200:
+                  hint = ""
+                  if "expired" in r.text.lower() or "OAuthException" in r.text:
+                      hint = " (التوكن منتهي أو غير صالح: أنشئ توكن صفحة طويل الأمد)"
+                  raise RuntimeError(f"فحص فيسبوك فشل {r.status_code}: {r.text[:300]}{hint}")
+              log(f"فيسبوك: الصفحة المتصلة = {r.json().get('name')}")
+
+
           # ---------- تشغيل السيرفر ----------
           def start_server():
               logf = open(LOGS / "server.log", "w", encoding="utf-8")
@@ -168,25 +219,28 @@ jobs:
               raise TimeoutError("السيرفر لم يبدأ خلال دقيقتين")
 
 
-          # ---------- Gemini (اختيار النموذج تلقائياً) ----------
+          # ---------- Gemini ----------
           _models = []
+          PREFERRED = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest",
+                       "gemini-2.5-flash-lite"]
 
 
           def pick_models(key):
               if _models:
                   return _models
-              r = requests.get(GEM, params={"key": key, "pageSize": 100}, timeout=30)
+              r = requests.get(GEM, params={"key": key, "pageSize": 200}, timeout=30)
               r.raise_for_status()
               names = [m["name"].split("/")[-1] for m in r.json().get("models", [])
                        if "generateContent" in m.get("supportedGenerationMethods", [])]
-              log(f"النماذج المتاحة: {names}")
-              good = [n for n in names if "flash" in n
-                      and not any(x in n for x in ("image", "tts", "live", "audio", "thinking", "exp", "preview"))]
-              good.sort(reverse=True)
-              rest = [n for n in names if n not in good and "flash" in n]
-              if not (good or rest):
+              chosen = [n for n in PREFERRED if n in names]
+              extra = [n for n in names if "flash" in n and n not in chosen
+                       and not any(x in n for x in ("image", "tts", "live", "audio", "omni",
+                                                    "thinking", "exp", "preview", "robotics",
+                                                    "transcribe", "banana"))]
+              _models.extend((chosen + sorted(extra, reverse=True))[:5])
+              if not _models:
                   raise RuntimeError(f"لا يوجد نموذج flash متاح لمفتاحك. المتاح: {names}")
-              _models.extend((good + rest)[:4])
+              log(f"نماذج Gemini المستخدمة: {_models}")
               return _models
 
 
@@ -212,63 +266,74 @@ jobs:
 
 
           def write_script(topic):
-              prompt = (f"اكتب نصا قصيرا بالعربية الفصحى (نحو 80 كلمة) عن: {topic}. "
-                        "اسلوب تاملي هادئ. لا تذكر اي اية او حديث او نسبة قول لاحد. "
-                        "اكتب النص فقط دون عنوان.")
-              return gemini(prompt, min_len=50)
+              prompt = (f"اكتب نصا قصيرا بالعربية الفصحى (نحو {WORDS} كلمة) عن: {topic}. "
+                        f"{CONTENT_STYLE} اكتب النص فقط دون عنوان ودون رموز.")
+              return gemini(prompt, min_len=40)
 
 
           def make_terms(topic, default):
               try:
-                  t = gemini(f"Give 5 English keywords for stock nature or sky footage matching "
+                  t = gemini("Give 5 English keywords for stock nature footage matching "
                              f"the theme: {topic}. Comma-separated, nothing else.")
                   t = re.sub(r"[^A-Za-z, ]", "", t).strip(" ,")
-                  return t or default
+                  return t or default or "nature, sky, calm"
               except Exception as e:
                   log(f"تعذر توليد الكلمات المفتاحية: {e}")
-                  return default
+                  return default or "nature, sky, calm"
 
 
-          # ---------- المواضيع البديلة (تُستخدم إذا لم يوجد فيديو) ----------
-          FALLBACKS = [
-              ("فضل الاستغفار", "nature, sky, calm"),
-              ("جمال التأمل في خلق الله", "ocean, mountains, sunrise"),
-              ("الصبر وحسن الظن بالله", "forest, river, clouds"),
-              ("شكر النعم", "sunset, flowers, garden"),
-          ]
-
-          TIERS = [
-              {"name": "full", "paragraph_number": 3},
-              {"name": "medium", "paragraph_number": 2},
-              {"name": "economy", "paragraph_number": 1},
-          ]
-
-
+          # ---------- انتظار المهمة وتحميل الفيديو ----------
           class TaskFailed(Exception):
               def __init__(self, stage, detail):
                   super().__init__(f"المهمة فشلت (المرحلة: {stage}): {detail}")
                   self.stage = stage
 
 
-          def wait_for_task(task_id, timeout=1500):
+          def fetch_video(path, task_id, out):
+              if path.startswith("http"):
+                  urls = [path]
+              else:
+                  rel = path if path.startswith("/") else "/" + path
+                  urls = [f"{API}{rel}", f"{API}/api/v1/download{rel}"]
+              errs = []
+              for u in urls:
+                  try:
+                      with requests.get(u, stream=True, timeout=180) as r:
+                          r.raise_for_status()
+                          with open(out, "wb") as f:
+                              for chunk in r.iter_content(1 << 20):
+                                  f.write(chunk)
+                      if out.stat().st_size > 10000:
+                          return
+                  except Exception as e:
+                      errs.append(f"{u}: {e}")
+              rel = path.lstrip("/")
+              for p in (MPT / rel, MPT / "storage" / rel, pathlib.Path(path)):
+                  if p.is_file() and p.stat().st_size > 10000:
+                      out.write_bytes(p.read_bytes())
+                      return
+              found = [p for p in MPT.rglob("final-*.mp4") if task_id in str(p)]
+              if found:
+                  out.write_bytes(found[0].read_bytes())
+                  return
+              raise TaskFailed("download", f"تعذر العثور على الفيديو: {path} | {errs}")
+
+
+          def wait_for_task(task_id, timeout=1800):
               start = time.time()
+              last_log = 0
               while time.time() - start < timeout:
                   d = requests.get(f"{API}/api/v1/tasks/{task_id}", timeout=30).json()["data"]
                   state = d.get("state")
-                  log(f"state={state} progress={d.get('progress')}")
+                  if time.time() - last_log > 30:
+                      log(f"state={state} progress={d.get('progress')}")
+                      last_log = time.time()
                   if state == 1:
                       videos = d.get("videos") or []
                       if not videos:
                           raise TaskFailed("output", "المهمة اكتملت بدون ملف فيديو")
                       out = LOGS / f"{task_id}.mp4"
-                      if videos[0].startswith("http"):
-                          with requests.get(videos[0], stream=True, timeout=120) as r:
-                              r.raise_for_status()
-                              with open(out, "wb") as f:
-                                  for chunk in r.iter_content(1 << 20):
-                                      f.write(chunk)
-                      else:
-                          out.write_bytes(pathlib.Path(videos[0]).read_bytes())
+                      fetch_video(videos[0], task_id, out)
                       return out
                   if state == -1:
                       raise TaskFailed(d.get("failed_stage") or "unknown",
@@ -277,17 +342,16 @@ jobs:
               raise TimeoutError("انتهت مهلة انتظار الفيديو")
 
 
-          # ---------- توليد الفيديو: إن لم يوجد فيديو يغيّر الموضوع ----------
-          def generate_video(first_topic):
-              candidates = [(first_topic, None)] + FALLBACKS
+          # ---------- توليد الفيديو: تغيير الموضوع إن لم يوجد فيديو/صورة ----------
+          def generate_video(topics):
               last_err = None
-              for topic, default_terms in candidates:
+              for topic, default_terms in topics[:5]:
                   log(f"الموضوع: {topic}")
                   script = write_script(topic)
-                  terms = make_terms(topic, default_terms or "nature, sky, calm")
+                  terms = make_terms(topic, default_terms)
                   log(f"كلمات البحث: {terms}")
-                  for tier in TIERS:
-                      log(f"محاولة بخطة: {tier['name']}")
+                  for attempt in (1, 2):
+                      log(f"محاولة التوليد رقم {attempt}")
                       body = {
                           "video_subject": topic,
                           "video_script": script,
@@ -296,53 +360,70 @@ jobs:
                           "voice_name": os.environ.get("VOICE_NAME", "ar-SA-HamedNeural-Male"),
                           "video_aspect": "9:16",
                           "video_source": "pexels",
-                          "paragraph_number": tier["paragraph_number"],
+                          "paragraph_number": 1,
                           "video_count": 1,
                       }
                       try:
                           r = requests.post(f"{API}/api/v1/videos", json=body, timeout=60)
                           r.raise_for_status()
-                          return wait_for_task(r.json()["data"]["task_id"]), topic
+                          return wait_for_task(r.json()["data"]["task_id"]), topic, script
                       except TaskFailed as e:
                           last_err = e
-                          log(f"فشلت خطة {tier['name']}: {e}")
+                          log(f"فشلت المحاولة: {e}")
                           if e.stage == "materials":
                               log("لم يوجد فيديو/صورة مناسبة، تغيير الموضوع...")
                               break
+                          if e.stage == "download":
+                              raise
                       except Exception as e:
                           last_err = e
-                          log(f"فشلت خطة {tier['name']}: {e}")
-              raise RuntimeError(f"فشلت كل المواضيع والخطط. آخر خطأ: {last_err}")
+                          log(f"فشلت المحاولة: {e}")
+              raise RuntimeError(f"فشلت كل المواضيع والمحاولات. آخر خطأ: {last_err}")
 
 
           # ---------- النشر على فيسبوك ----------
-          def publish(video_path, topic):
+          def publish(video_path, topic, script):
               page_id, token = need("FB_PAGE_ID"), need("FB_PAGE_TOKEN")
-              published = "true" if os.environ.get("PUBLISH_MODE") == "public" else "false"
-              with open(video_path, "rb") as f:
-                  r = requests.post(
-                      f"https://graph.facebook.com/v21.0/{page_id}/videos",
-                      data={"access_token": token, "description": topic, "published": published},
-                      files={"source": f}, timeout=600)
-              if r.status_code != 200:
-                  raise RuntimeError(f"Facebook API {r.status_code}: {r.text}")
-              log(f"تم الرفع ({'نشر مباشر' if published == 'true' else 'مسودة'}): {r.json()}")
+              public = os.environ.get("PUBLISH_MODE", "public") == "public"
+              description = f"{topic}\n\n{script}\n\n{HASHTAGS}"
+              last = None
+              for attempt in range(3):
+                  try:
+                      with open(video_path, "rb") as f:
+                          r = requests.post(
+                              f"{FB}/{page_id}/videos",
+                              data={"access_token": token, "title": topic,
+                                    "description": description,
+                                    "published": "true" if public else "false"},
+                              files={"source": f}, timeout=900)
+                      if r.status_code == 200:
+                          log(f"تم الرفع ({'نشر علني' if public else 'مسودة'}): {r.json()}")
+                          return r.json()
+                      last = f"Facebook API {r.status_code}: {r.text[:400]}"
+                      if r.status_code in (400, 401, 403):
+                          break
+                  except requests.RequestException as e:
+                      last = str(e)
+                  log(f"فشلت محاولة النشر {attempt + 1}: {last}")
+                  time.sleep(15 * (attempt + 1))
+              raise RuntimeError(last)
 
 
           def main():
               for n in ("FB_PAGE_ID", "FB_PAGE_TOKEN", "GEMINI_API_KEY", "PEXELS_API_KEY"):
                   need(n)
-              topic = os.environ.get("VIDEO_TOPIC", "").strip() or "فضل الذكر والاستغفار"
+              custom = os.environ.get("VIDEO_TOPIC", "").strip()
+              check_facebook()
               prepare_config()
               server = start_server()
               try:
-                  video, used_topic = generate_video(topic)
-                  publish(video, used_topic)
+                  video, used_topic, script = generate_video(todays_topics(custom))
+                  result = publish(video, used_topic, script)
               finally:
                   server.terminate()
               if SUMMARY:
                   with open(SUMMARY, "a", encoding="utf-8") as s:
-                      s.write(f"## ✅ تم بنجاح\n- الموضوع المستخدم: {used_topic}\n")
+                      s.write(f"## ✅ تم النشر\n- الموضوع: {used_topic}\n- النتيجة: `{result}`\n")
 
 
           if __name__ == "__main__":
