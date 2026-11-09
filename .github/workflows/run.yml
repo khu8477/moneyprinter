@@ -78,6 +78,7 @@ jobs:
         env:
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           VIDEO_TOPIC: ${{ github.event.inputs.topic }}
           PUBLISH_MODE: ${{ github.event.inputs.publish_mode || 'draft' }}
         run: |
@@ -125,7 +126,7 @@ jobs:
               return val
 
 
-          # ---------- إعداد الأداة (بدون أي مفاتيح خارجية) ----------
+          # ---------- إعداد الأداة ----------
           def prepare_config():
               src, dst = MPT / "config.example.toml", MPT / "config.toml"
               text = src.read_text(encoding="utf-8")
@@ -155,18 +156,21 @@ jobs:
               raise TimeoutError("السيرفر لم يبدأ خلال دقيقتين")
 
 
-          # ---------- كتابة النص (مجاني بدون مفتاح) ----------
+          # ---------- كتابة النص عبر Gemini ----------
           def write_script(topic):
+              key = need("GEMINI_API_KEY")
               prompt = (f"اكتب نصا قصيرا بالعربية الفصحى (نحو 80 كلمة) عن: {topic}. "
                         "اسلوب تاملي هادئ. لا تذكر اي اية او حديث او نسبة قول لاحد. "
                         "اكتب النص فقط دون عنوان.")
+              url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+                     "gemini-2.0-flash:generateContent")
               last = None
               for attempt in range(3):
                   try:
-                      r = requests.get("https://text.pollinations.ai/" + requests.utils.quote(prompt),
-                                       timeout=90)
+                      r = requests.post(url, params={"key": key}, timeout=90,
+                                        json={"contents": [{"parts": [{"text": prompt}]}]})
                       r.raise_for_status()
-                      text = r.text.strip()
+                      text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
                       if len(text) >= 50:
                           return text
                       last = "النص المولّد قصير أو فارغ"
@@ -269,6 +273,7 @@ jobs:
           def main():
               need("FB_PAGE_ID")
               need("FB_PAGE_TOKEN")
+              need("GEMINI_API_KEY")
               topic = os.environ.get("VIDEO_TOPIC", "").strip() or "فضل الذكر والاستغفار"
               prepare_config()
               server = start_server()
