@@ -156,29 +156,46 @@ jobs:
               raise TimeoutError("السيرفر لم يبدأ خلال دقيقتين")
 
 
-          # ---------- كتابة النص عبر Gemini ----------
+          # ---------- كتابة النص عبر Gemini (اختيار النموذج تلقائياً) ----------
+          def pick_models(key):
+              r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                               params={"key": key, "pageSize": 100}, timeout=30)
+              r.raise_for_status()
+              names = [m["name"].split("/")[-1] for m in r.json().get("models", [])
+                       if "generateContent" in m.get("supportedGenerationMethods", [])]
+              log(f"النماذج المتاحة: {names}")
+              good = [n for n in names if "flash" in n
+                      and not any(x in n for x in ("image", "tts", "live", "audio", "thinking", "exp", "preview"))]
+              good.sort(reverse=True)
+              rest = [n for n in names if n not in good and "flash" in n]
+              if not (good or rest):
+                  raise RuntimeError(f"لا يوجد نموذج flash متاح لمفتاحك. المتاح: {names}")
+              return (good + rest)[:4]
+
+
           def write_script(topic):
               key = need("GEMINI_API_KEY")
               prompt = (f"اكتب نصا قصيرا بالعربية الفصحى (نحو 80 كلمة) عن: {topic}. "
                         "اسلوب تاملي هادئ. لا تذكر اي اية او حديث او نسبة قول لاحد. "
                         "اكتب النص فقط دون عنوان.")
-              url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-                     "gemini-2.0-flash:generateContent")
               last = None
-              for attempt in range(3):
-                  try:
-                      r = requests.post(url, params={"key": key}, timeout=90,
-                                        json={"contents": [{"parts": [{"text": prompt}]}]})
-                      r.raise_for_status()
-                      text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-                      if len(text) >= 50:
-                          return text
-                      last = "النص المولّد قصير أو فارغ"
-                  except Exception as e:
-                      last = e
-                  log(f"محاولة النص {attempt + 1} فشلت: {last}")
-                  time.sleep(5 * (attempt + 1))
-              raise RuntimeError(f"فشل توليد النص: {last}")
+              for model in pick_models(key):
+                  url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+                  for attempt in range(2):
+                      try:
+                          r = requests.post(url, params={"key": key}, timeout=90,
+                                            json={"contents": [{"parts": [{"text": prompt}]}]})
+                          r.raise_for_status()
+                          text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                          if len(text) >= 50:
+                              log(f"تم توليد النص بالنموذج: {model}")
+                              return text
+                          last = "النص المولّد قصير أو فارغ"
+                      except Exception as e:
+                          last = f"{model}: {e}"
+                      log(f"فشلت المحاولة ({model}): {last}")
+                      time.sleep(4)
+              raise RuntimeError(f"فشل توليد النص بكل النماذج. آخر خطأ: {last}")
 
 
           # ---------- خلفية الفيديو (ffmpeg) ----------
