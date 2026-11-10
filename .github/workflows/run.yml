@@ -80,6 +80,8 @@ jobs:
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           VIDEO_TOPIC: ${{ github.event.inputs.topic }}
           PUBLISH_MODE: ${{ github.event.inputs.publish_mode || 'public' }}
         run: |
@@ -94,6 +96,7 @@ jobs:
           API = "http://127.0.0.1:8080"
           GEM = "https://generativelanguage.googleapis.com/v1beta/models"
           FB = "https://graph.facebook.com/v21.0"
+          TG = "https://api.telegram.org"
           SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY")
 
 
@@ -129,20 +132,78 @@ jobs:
           # =====================================================
 
 
+          # ---------- إخفاء الأسرار من السجلات والرسائل ----------
+          SECRET_NAMES = ("FB_PAGE_TOKEN", "GEMINI_API_KEY", "PEXELS_API_KEY", "TG_BOT_TOKEN")
+
+
+          def redact(text):
+              text = str(text)
+              for name in SECRET_NAMES:
+                  val = os.environ.get(name, "").strip()
+                  if val:
+                      text = text.replace(val, "***")
+              return text
+
+
+          # ---------- تيليغرام ----------
+          def _tg_creds():
+              return (os.environ.get("TG_BOT_TOKEN", "").strip(),
+                      os.environ.get("TG_CHAT_ID", "").strip())
+
+
+          def tg_send(text):
+              token, chat = _tg_creds()
+              if not token or not chat:
+                  return False
+              try:
+                  r = requests.post(f"{TG}/bot{token}/sendMessage",
+                                    data={"chat_id": chat, "text": redact(text)[:4000]},
+                                    timeout=30)
+                  return r.status_code == 200
+              except Exception as e:
+                  print(redact(f"تعذر إرسال رسالة تيليغرام: {e}"))
+                  return False
+
+
+          def tg_video(path, caption):
+              token, chat = _tg_creds()
+              if not token or not chat:
+                  log("تيليغرام غير مفعّل (TG_BOT_TOKEN/TG_CHAT_ID غير موجودين)")
+                  return False
+              if path.stat().st_size > 50 * 1024 * 1024:  # حد البوتات 50MB
+                  tg_send(caption + "\n\n(الفيديو أكبر من 50MB فلم يُرسل)")
+                  return False
+              try:
+                  with open(path, "rb") as f:
+                      r = requests.post(f"{TG}/bot{token}/sendVideo",
+                                        data={"chat_id": chat,
+                                              "caption": redact(caption)[:1024],
+                                              "supports_streaming": "true"},
+                                        files={"video": f}, timeout=600)
+                  if r.status_code == 200:
+                      log("تم إرسال الفيديو إلى تيليغرام")
+                      return True
+                  log(f"فشل إرسال الفيديو لتيليغرام {r.status_code}: {r.text[:200]}")
+              except Exception as e:
+                  log(f"فشل إرسال الفيديو لتيليغرام: {e}")
+              return False
+
+
           # ---------- إظهار مكان الخطأ ----------
           def report_error(exc_type, exc, tb):
               frames = traceback.extract_tb(tb)
               mine = [f for f in frames if str(ROOT) in f.filename] or frames
               last = mine[-1]
-              msg = f"{exc_type.__name__}: {exc}".replace("\n", " ")
+              msg = redact(f"{exc_type.__name__}: {exc}".replace("\n", " "))
               print(f"::error file=run_and_publish.py,line={last.lineno},title=Script failed::{msg[:900]}")
-              full = "".join(traceback.format_exception(exc_type, exc, tb))
+              full = redact("".join(traceback.format_exception(exc_type, exc, tb)))
               print(full)
+              tg_send(f"❌ فشل التشغيل\nالسطر: {last.lineno} ({last.name})\n{msg[:600]}")
               if SUMMARY:
                   with open(SUMMARY, "a", encoding="utf-8") as s:
                       s.write("## ❌ فشل التشغيل\n")
                       s.write(f"- **السطر في السكربت:** `{last.lineno}`\n")
-                      s.write(f"- **الدالة:** `{last.name}`\n- **الكود:** `{last.line}`\n")
+                      s.write(f"- **الدالة:** `{last.name}`\n- **الكود:** `{redact(last.line)}`\n")
                       s.write(f"- **الخطأ:** `{msg[:900]}`\n\n```\n{full}\n```\n")
               (LOGS / "error.txt").write_text(full, encoding="utf-8")
 
@@ -151,7 +212,7 @@ jobs:
 
 
           def log(msg):
-              print(f"[{datetime.datetime.now():%H:%M:%S}] {msg}", flush=True)
+              print(redact(f"[{datetime.datetime.now():%H:%M:%S}] {msg}"), flush=True)
 
 
           def need(name):
@@ -392,50 +453,4 @@ jobs:
                       with open(video_path, "rb") as f:
                           r = requests.post(
                               f"{FB}/{page_id}/videos",
-                              data={"access_token": token, "title": topic,
-                                    "description": description,
-                                    "published": "true" if public else "false"},
-                              files={"source": f}, timeout=900)
-                      if r.status_code == 200:
-                          log(f"تم الرفع ({'نشر علني' if public else 'مسودة'}): {r.json()}")
-                          return r.json()
-                      last = f"Facebook API {r.status_code}: {r.text[:400]}"
-                      if r.status_code in (400, 401, 403):
-                          break
-                  except requests.RequestException as e:
-                      last = str(e)
-                  log(f"فشلت محاولة النشر {attempt + 1}: {last}")
-                  time.sleep(15 * (attempt + 1))
-              raise RuntimeError(last)
-
-
-          def main():
-              for n in ("FB_PAGE_ID", "FB_PAGE_TOKEN", "GEMINI_API_KEY", "PEXELS_API_KEY"):
-                  need(n)
-              custom = os.environ.get("VIDEO_TOPIC", "").strip()
-              check_facebook()
-              prepare_config()
-              server = start_server()
-              try:
-                  video, used_topic, script = generate_video(todays_topics(custom))
-                  result = publish(video, used_topic, script)
-              finally:
-                  server.terminate()
-              if SUMMARY:
-                  with open(SUMMARY, "a", encoding="utf-8") as s:
-                      s.write(f"## ✅ تم النشر\n- الموضوع: {used_topic}\n- النتيجة: `{result}`\n")
-
-
-          if __name__ == "__main__":
-              main()
-          PY
-          python run_and_publish.py
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs
-          path: logs/
-          if-no-files-found: ignore
-          retention-days: 7
+                              data={"acc
